@@ -75,38 +75,6 @@ def drawdown(P):
     return dd
 
 
-def rebalancing_returns(R, w, w_volTarget, Rp, RvolT, rebalance_points, step, tc=0.001):
-    """
-    Compute rebalanced returns for Kelly and volatility-targeting strategies.
-
-    Args:
-        R: array of log returns
-        w: array of Kelly weights
-        w_volTarget: array of volatility-targeting weights
-        Rp: preallocated array for Kelly strategy returns (modified in place)
-        RvolT: preallocated array for vol-targeting strategy returns (modified in place)
-        rebalance_points: list of time indices where rebalancing occurs
-        step: number of time periods between rebalances
-        tc: transaction cost (default 0.1%)
-
-    Returns:
-        None (Rp and RvolT are modified in place)
-    """
-    for idx, i in enumerate(rebalance_points):
-        prev_ret = R[(i - step) : i].sum()
-        this_ret = R[i : (i + step)].sum()
-
-        w_eff = w[i - 1] * (1 + prev_ret) / (1 + w[i - 1] * prev_ret)
-        trade = abs(w[i] - w_eff)
-        Rp[idx] = w[i] * this_ret - trade * tc
-
-        wv_eff = (
-            w_volTarget[i - 1] * (1 + prev_ret) / (1 + w_volTarget[i - 1] * prev_ret)
-        )
-        trade_vol = abs(w_volTarget[i] - wv_eff)
-        RvolT[idx] = w_volTarget[i] * this_ret - trade_vol * tc
-
-
 def stats(R_ts, Rebalancing):
     mean = R_ts.mean() * Rebalancing
     sd = R_ts.std() * np.sqrt(Rebalancing)
@@ -265,3 +233,267 @@ def kelly(
 
     return results
 
+def simulate_two_asset_returns(
+    periods: int,
+    T: int,
+    lns: np.ndarray,
+    regime: np.ndarray,
+    p_eq: np.ndarray,
+    p_b: np.ndarray,
+    sharpe: str,
+    c_eq: float,
+    c_b: float,
+    m: float,
+    annual_ret_eq: float,
+    annual_ret_b: float,
+    partial_vol: float,
+    rho_r: float
+):
+    """
+    Simulate two‐asset returns with regime‐switching and momentum.
+
+    Returns:
+      p_eq, p_b       : updated price series (length T)
+      r_eq, r_b       : return series
+      E_r_eq, E_r_b   : expected excess‐return series
+      momentum_eq, momentum_b : momentum series (12-month log returns)
+    """
+    # pre‐allocate
+    momentum_eq = np.zeros(T)
+    momentum_b  = np.zeros(T)
+    E_r_eq      = np.zeros(T)
+    E_r_b       = np.zeros(T)
+    r_eq        = np.zeros(T)
+    r_b         = np.zeros(T)
+
+    for i in range(periods + 1, T):
+        sigma = np.exp(lns[i])
+
+        # 12-month log return momentum
+        momentum_eq[i] = p_eq[i-2] - p_eq[i-(periods + 1)]
+        momentum_b[i]  = p_b[i-2]  - p_b[i-(periods + 1)]
+
+        # expected‐return depending on regime & sharpe setting
+        if sharpe == "constant":
+            if regime[i] == 0:
+                E_r_eq[i] = c_eq * sigma   + m * momentum_eq[i]
+                E_r_b[i]  = c_b  * sigma   + m * momentum_b[i]
+            else:
+                E_r_eq[i] = c_eq * sigma
+                E_r_b[i]  = c_b  * sigma
+        elif sharpe == "variable":
+            if regime[i] == 0:
+                E_r_eq[i] = annual_ret_eq/periods + m * momentum_eq[i]
+                E_r_b[i]  = annual_ret_b/periods  + m * momentum_b[i]
+            else:
+                E_r_eq[i] = annual_ret_eq/periods
+                E_r_b[i]  = annual_ret_b/periods
+
+        # generate random shocks & returns
+        ε1 = np.random.randn()
+        ε2 = np.random.randn()
+        r_eq[i] = E_r_eq[i] + sigma * ε1
+        r_b[i]  = E_r_b[i]  + sigma * partial_vol * (
+                     rho_r * ε1 + np.sqrt(1 - rho_r**2) * ε2
+                  )
+
+        # update prices
+        p_eq[i] = p_eq[i-1] + r_eq[i]
+        p_b[i]  = p_b[i-1] + r_b[i]
+
+    return p_eq, p_b, r_eq, r_b, E_r_eq, E_r_b, momentum_eq, momentum_b
+
+
+def rebalanced_returns(
+     R: np.ndarray,
+    w: np.ndarray,
+    rebalancing: int,
+    periods: int = 12,
+    tc: float = 0.001
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute rebalanced returns (net of transaction costs) and trading costs
+    for a single‐strategy weight series, rebalancing a given number of times per year.
+
+    Args:
+        R            : array of log returns, length T
+        w            : array of target weights, length T
+        rebalancing  : times per year to rebalance (e.g. 12=monthly, 4=quarterly)
+        periods      : number of periods in one year (default 12 for monthly data)
+        tc           : transaction cost per unit traded (default 0.1%)
+
+    Returns:
+        Rp           : np.ndarray of net returns for each rebalance interval
+        trade_costs  : np.ndarray of transaction costs at each rebalance
+    """
+    T = len(R)
+    step = periods // rebalancing
+    if step < 1:
+        raise ValueError(
+            f"Rebalancing frequency ({rebalancing}) must be ≤ periods ({periods})."
+        )
+
+    # build the rebalance index points: step, 2*step, 3*step, … up to T
+    rebalance_points = np.arange(step, T, step)
+    n = len(rebalance_points)
+
+    Rp = np.zeros(n)
+    trade_costs = np.zeros(n)
+
+    for idx, i in enumerate(rebalance_points):
+        # cumulative return over the last interval
+        prev_ret = R[i - step : i].sum()
+        # return over the upcoming interval
+        this_ret = R[i : min(i + step, T)].sum()
+
+        # “effective” weight just before rebalancing
+        w_eff = w[i - 1] * (1 + prev_ret) / (1 + w[i - 1] * prev_ret)
+
+        # compute trade amount and cost
+        trade = abs(w[i] - w_eff)
+        cost = trade * tc
+        trade_costs[idx] = cost
+
+        # net return after paying transaction cost
+        Rp[idx] = w[i] * this_ret - cost
+
+    return Rp, trade_costs
+
+import cvxpy as cp
+
+def kelly_no_shorts(mu: np.ndarray, Sigma: np.ndarray):
+    """
+    Solve max { mu^T w - 0.5 w^T Sigma w }  s.t. w >= 0.
+    Returns the optimal w (no further clipping needed).
+    """
+    n = len(mu)
+    w = cp.Variable(n)
+    objective = cp.Maximize(mu.T @ w - 0.5 * cp.quad_form(w, Sigma))
+    constraints = [w >= 0]
+    problem = cp.Problem(objective, constraints)
+    problem.solve(solver = cp.OSQP, verbose = False)
+    return w.value
+
+
+
+def MC_func(
+    n_years,
+    periods,
+    burn_in,
+    p_LL,
+    p_HH,
+    vol_low_annual,
+    vol_high_annual,
+    rho,
+    std_lns,
+    jump_prob,
+    jump_size,
+    c,
+    m,
+    annual_ret,
+    sharpe,
+    f,
+    min_leverage,
+    max_leverage,
+    Rebalancing,
+    scale_long
+):
+    """
+    Run one Monte Carlo path and return metrics for three strategies:
+    - buy-and-hold (long)
+    - regime-based Kelly
+    - volatility-targeting
+
+    Returns dict with sharpe, final_wealth, max_drawdown for each.
+    """
+    # 1) Simulate
+    N = n_years * periods
+    T = N + burn_in
+
+    p        = np.zeros(T)
+    r        = np.zeros(T)
+    E_r      = np.zeros(T)
+    momentum = np.zeros(T)
+
+    lns, regime, jumps = simulate_regime_vol_with_jumps(
+        T, p_LL, p_HH,
+        vol_low_annual, vol_high_annual,
+        rho, std_lns,
+        jump_prob, jump_size,
+        periods
+    )
+
+    # 2) Build path
+    for i in range(periods+1, T):
+        sigma       = np.exp(lns[i])
+        momentum[i] = p[i-2] - p[i-(periods+1)]
+
+        if sharpe == "constant":
+            E_r[i] = c * sigma + (m * momentum[i] if regime[i] == 0 else 0)
+        else:
+            base   = annual_ret / periods
+            E_r[i] = base + (m * momentum[i] if regime[i] == 0 else 0)
+
+        r[i] = E_r[i] + sigma * np.random.randn()
+        p[i] = p[i-1] + r[i]
+
+    # 3) Discard burn-in
+    p        = p[burn_in:] - p[burn_in]
+    r        = r[burn_in:]
+    E_r      = E_r[burn_in:]
+    momentum = momentum[burn_in:]
+    lns      = lns[burn_in:]
+
+    # 4) Levels & returns
+    P    = np.exp(p)
+    R    = np.exp(r) - 1
+    vol  = np.exp(lns)
+    E_R  = E_r + 0.5 * vol**2
+    E_R2 = vol**2
+
+    # Weights
+    w           = np.clip(f * (E_R / E_R2), min_leverage, max_leverage)
+    w_volTarget = np.clip(np.mean(vol) / vol, min_leverage, max_leverage)
+
+    # 5) Rebalancing
+    step  = periods // Rebalancing
+    steps = n_years * Rebalancing
+    Rp      = np.zeros(steps)
+    RvolT   = np.zeros(steps)
+
+    for idx, i in enumerate(range(step, n_years*periods, step)):
+        prev_ret = R[(i-step):i].sum()
+        this_ret = R[i:(i+step)].sum()
+
+        w_eff   = w[i-1]*(1+prev_ret)/(1+w[i-1]*prev_ret)
+        trade   = abs(w[i] - w_eff)
+        Rp[idx] = w[i]*this_ret - trade*(0.1/100)
+
+        wv_eff      = w_volTarget[i-1]*(1+prev_ret)/(1+w_volTarget[i-1]*prev_ret)
+        trade_vol   = abs(w_volTarget[i] - wv_eff)
+        RvolT[idx]  = w_volTarget[i]*this_ret - trade_vol*(0.1/100)
+
+    # 6) Buy-and-hold monthly
+    monthly_long = P[step::step] / P[:-step:step] - 1
+
+    if scale_long == "same_avg_vol":
+        monthly_long *= (Rp.std() / monthly_long.std())
+    elif scale_long == "vol_targeting":
+        monthly_long *= (Rp.std() / monthly_long.std())
+
+    # 7) Stats
+    sl, wl, dl = stats(monthly_long)
+    sk, wk, dk = stats(Rp)
+    sv, wv, dv = stats(RvolT)
+
+    return {
+        "sharpe_long": sl,
+        "sharpe_kelly": sk,
+        "sharpe_volTarget": sv,
+        "final_wealth_long": wl,
+        "final_wealth_kelly": wk,
+        "final_wealth_volTarget": wv,
+        "max_dd_volTarget": dv,
+        "max_dd_long": dl,
+        "max_dd_kelly": dk
+    }
