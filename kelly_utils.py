@@ -254,6 +254,8 @@ def kelly(
         results.update({
             "volatility_path": vol * np.sqrt(periods),  # Annualized
             "log_prices": p,
+            "kelly_weights": w,
+            "vol_target_weights": w_volTarget,
             "wealth_paths": {
                 "buy_and_hold": np.cumprod(1 + monthly_long),
                 "kelly": np.cumprod(1 + Rp),
