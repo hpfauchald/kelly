@@ -247,7 +247,7 @@ def simulate_two_asset_returns(
     annual_ret_eq: float,
     annual_ret_b: float,
     partial_vol: float,
-    rho_r: float
+    rho_r: float, 
 ):
     """
     Simulate two‐asset returns with regime‐switching and momentum.
@@ -277,10 +277,10 @@ def simulate_two_asset_returns(
         if sharpe == "constant":
             if regime[i] == 0:
                 E_r_eq[i] = c_eq * sigma   + m * momentum_eq[i]
-                E_r_b[i]  = c_b  * sigma   + m * momentum_b[i]
+                E_r_b[i]  = c_b  * sigma * partial_vol   + m * momentum_b[i]
             else:
                 E_r_eq[i] = c_eq * sigma
-                E_r_b[i]  = c_b  * sigma
+                E_r_b[i]  = c_b  * sigma * partial_vol
         elif sharpe == "variable":
             if regime[i] == 0:
                 E_r_eq[i] = annual_ret_eq/periods + m * momentum_eq[i]
@@ -496,4 +496,125 @@ def MC_func(
         "max_dd_volTarget": dv,
         "max_dd_long": dl,
         "max_dd_kelly": dk
+    }
+
+
+def simulate_kelly(
+    n_years,
+    periods,
+    burn_in,
+    f,
+    Rebalancing,
+    tc_rate,
+    SR_eq,
+    SR_b,
+    partial_vol,
+    m,
+    sharpe_mode,
+    short_constraint,
+    annual_ret_eq,
+    annual_ret_b,
+    rho_r,
+    p_LL,
+    p_HH,
+    vol_low_annual,
+    vol_high_annual,
+    rho,
+    std_lns,
+    jump_prob,
+    jump_size, 
+    max_leverage
+):
+    """
+    Run a single simulation of the Kelly strategy and an equal-weight (EW) strategy for two assets.
+    All model parameters are passed explicitly.
+    Returns metrics for both Kelly and EW portfolios plus transaction costs.
+    """
+    # 1) Setup timeline
+    N = n_years * periods
+    T = N + burn_in
+
+    # 2) Simulate regimes & volatility
+    lns, regime, jumps = simulate_regime_vol_with_jumps(
+        T, p_LL, p_HH, vol_low_annual, vol_high_annual,
+        rho, std_lns, jump_prob, jump_size, periods
+    )
+    vol = np.exp(lns)
+
+    # 3) Simulate prices & raw returns
+    p_eq, p_b, r_eq, r_b, E_r_eq, E_r_b, _, _ = simulate_two_asset_returns(
+        periods=periods,
+        T=T,
+        lns=lns,
+        regime=regime,
+        p_eq=np.zeros(T),
+        p_b=np.zeros(T),
+        sharpe=sharpe_mode,
+        c_eq=SR_eq/np.sqrt(periods),
+        c_b=SR_b/np.sqrt(periods),
+        m=m,
+        annual_ret_eq=annual_ret_eq,
+        annual_ret_b=annual_ret_b,
+        partial_vol=partial_vol,
+        rho_r=rho_r
+    )
+
+    # 4) Discard burn-in
+    r_eq = r_eq[burn_in:]
+    r_b = r_b[burn_in:]
+    vol_trim = vol[burn_in:]
+
+    # 5) Expected returns & variances
+    E_R_eq = E_r_eq[burn_in:] + 0.5 * vol_trim**2
+    E_R_b = E_r_b[burn_in:] + 0.5 * (vol_trim * partial_vol)**2
+    E_R2_eq = vol_trim**2
+    E_R2_b = (vol_trim * partial_vol)**2
+
+    # 6) Kelly weights over time
+    W = np.zeros((N,2))
+    for t in range(N):
+        E_R = np.array([E_R_eq[t], E_R_b[t]])
+        cov = rho_r * np.sqrt(E_R2_eq[t]) * np.sqrt(E_R2_b[t])
+        SIGMA = np.array([[E_R2_eq[t], cov],[cov, E_R2_b[t]]])
+        raw = (kelly_no_shorts(E_R,SIGMA) if short_constraint else np.linalg.solve(SIGMA,E_R))
+
+        total = np.abs(raw).sum()
+
+        if total > max_leverage:
+            W[t] = raw * (max_leverage / total)
+        else: 
+            W[t] = raw
+
+    # 7) Rebalanced log returns & transaction costs for Kelly
+    net_eq, tc_eq = rebalanced_returns(r_eq, W[:,0]*f, Rebalancing, periods, tc_rate)
+    net_b , tc_b  = rebalanced_returns(r_b,  W[:,1]*f, Rebalancing, periods, tc_rate)
+
+    Kelly_r = net_eq + net_b
+    Kelly_R = np.exp(Kelly_r) - 1
+    Kelly_sharpe, Kelly_FinalW, Kelly_maxDD = stats(Kelly_R, Rebalancing)[:3]
+    tc_eq_total = tc_eq.sum()
+    tc_b_total  = tc_b.sum()
+
+    # 8) Equal-weight (50/50) strategy
+    w_eq = np.full(N, 0.5)
+    net_eq_EW, tc_eq_EW = rebalanced_returns(r_eq, w_eq, Rebalancing, periods, tc_rate)
+    net_b_EW , tc_b_EW  = rebalanced_returns(r_b,  w_eq, Rebalancing, periods, tc_rate)
+
+    EW_r = net_eq_EW + net_b_EW
+    EW_R = np.exp(EW_r) - 1
+    EW_sharpe, EW_FinalW, EW_maxDD = stats(EW_R, Rebalancing)[:3]
+    tc_eq_EW_total = tc_eq_EW.sum()
+    tc_b_EW_total  = tc_b_EW.sum()
+
+    return {
+        'Kelly_sharpe': Kelly_sharpe,
+        'Kelly_FinalW': Kelly_FinalW,
+        'Kelly_maxDD':  Kelly_maxDD,
+        'tc_eq_Kelly':  tc_eq_total,
+        'tc_b_Kelly':   tc_b_total,
+        'EW_sharpe':    EW_sharpe,
+        'EW_FinalW':    EW_FinalW,
+        'EW_maxDD':     EW_maxDD,
+        'tc_eq_EW':     tc_eq_EW_total,
+        'tc_b_EW':      tc_b_EW_total
     }
