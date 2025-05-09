@@ -106,7 +106,8 @@ def kelly(
     scale_long,
     use_momentum,
     use_TC,
-    return_paths
+    return_paths, 
+    tc
 ):
     """
     Simulates asset returns under a regime-switching volatility model and evaluates:
@@ -150,7 +151,7 @@ def kelly(
         momentum[i] = p[i - 2] - p[i - (periods + 1)]
 
         if sharpe == "constant":
-            E_r[i] = c * sigma
+            E_r[i] = c * sigma 
         else:
             E_r[i] = annual_ret / periods
 
@@ -182,16 +183,17 @@ def kelly(
     step = periods // Rebalancing
     rebalance_points = list(range(step, len(R) - step, step))
     steps = len(rebalance_points)
-    Rp = np.zeros(steps)
-    RvolT = np.zeros(steps)
 
     if use_TC:
-        rebalancing_returns(R, w, w_volTarget, Rp, RvolT, rebalance_points, step)
+        Rp, Rp_tc = rebalanced_returns(R, w, Rebalancing, periods, tc)
+        RvolT, RvolT_tc_ = rebalanced_returns(R, w_volTarget, Rebalancing, periods, tc)
     else:
+        Rp = np.zeros(steps)
+        RvolT = np.zeros(steps)
         for idx, i in enumerate(rebalance_points):
-            this_ret = R[i : (i + step)].sum()
-            Rp[idx] = w[i] * this_ret
-            RvolT[idx] = w_volTarget[i] * this_ret
+            this_ret = max((np.prod(1 + R[i : i+step]) - 1),-1)
+            Rp[idx] = max(w[i] * this_ret,-1)
+            RvolT[idx] = max(w_volTarget[i] * this_ret,-1)
 
     # 6) Buy-and-hold monthly
     monthly_long = P[step::step] / P[:-step:step] - 1
@@ -342,9 +344,9 @@ def rebalanced_returns(
 
     for idx, i in enumerate(rebalance_points):
         # cumulative return over the last interval
-        prev_ret = R[i - step : i].sum()
+        prev_ret = max((np.prod(1 + R[i - step : i])-1).sum(), -1)
         # return over the upcoming interval
-        this_ret = R[i : min(i + step, T)].sum()
+        this_ret = max((np.prod(1 + R[i : min(i + step, T)])-1).sum(), -1)
 
         # “effective” weight just before rebalancing
         w_eff = w[i - 1] * (1 + prev_ret) / (1 + w[i - 1] * prev_ret)
@@ -355,7 +357,7 @@ def rebalanced_returns(
         trade_costs[idx] = cost
 
         # net return after paying transaction cost
-        Rp[idx] = w[i] * this_ret - cost
+        Rp[idx] = max(w[i] * this_ret - cost, -1)
 
     return Rp, trade_costs
 
@@ -570,7 +572,7 @@ def simulate_kelly(
     E_R2_eq = vol_trim**2
     E_R2_b = (vol_trim * partial_vol)**2
 
-    # 6) Kelly weights over time
+    # 6) (Kelly) weights over time
     W = np.zeros((N,2))
     for t in range(N):
         E_R = np.array([E_R_eq[t], E_R_b[t]])
