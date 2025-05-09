@@ -2,6 +2,7 @@ import numpy as np
 import time
 import os
 from pathlib import Path
+import pandas as pd
 
 def tic():
     global start_time
@@ -107,7 +108,10 @@ def kelly(
     use_momentum,
     use_TC,
     return_paths, 
-    tc
+    tc, 
+    expected_return = "knwown", 
+    return_vol_relation = "yes", 
+    expected_vol = "known"
 ):
     """
     Simulates asset returns under a regime-switching volatility model and evaluates:
@@ -160,6 +164,8 @@ def kelly(
 
         r[i] = E_r[i] + sigma * np.random.randn()
         p[i] = p[i - 1] + r[i]
+    
+    hist_r   = pd.Series(r).rolling(window=2520).mean().to_numpy()
 
     # 3) Discard burn-in
     p = p[burn_in:] - p[burn_in]
@@ -167,13 +173,22 @@ def kelly(
     E_r = E_r[burn_in:]
     momentum = momentum[burn_in:]
     lns = lns[burn_in:]
+    hist_r = hist_r[burn_in:]
 
     # 4) Levels & returns
     P = np.exp(p)
     R = np.exp(r) - 1
     vol = np.exp(lns)
-    E_R = E_r + 0.5 * vol**2
-    E_R2 = vol**2
+
+    if expected_return == "known":
+        E_R = E_r + 0.5 * vol**2
+    elif expected_return == "unknown": 
+        E_R = hist_r + 0.5*vol**2
+
+    if expected_vol == "known":
+        E_R2 = vol**2
+    elif expected_vol == "unknown":
+        E_R2 = "SETT INN FUNKSJON FOR VOL ESTIMERING"
 
     # Weights
     w = np.clip(f * (E_R / E_R2), min_leverage, max_leverage)
@@ -222,16 +237,21 @@ def kelly(
 
     if return_paths:
         results.update({
-            "volatility_path": vol * np.sqrt(periods),  # Annualized
-            "log_prices": p,
-            "kelly_weights": w,
-            "vol_target_weights": w_volTarget,
-            "wealth_paths": {
-                "buy_and_hold": np.cumprod(1 + monthly_long),
-                "kelly": np.cumprod(1 + Rp),
-                "vol_target": np.cumprod(1 + RvolT),
-            }
-        })
+        "volatility_path": vol * np.sqrt(periods),  # Annualized
+        "log_prices": p,
+        "kelly_weights": w,
+        "vol_target_weights": w_volTarget,
+        "wealth_paths": {
+            "buy_and_hold": np.cumprod(1 + monthly_long),
+            "kelly": np.cumprod(1 + Rp),
+            "vol_target": np.cumprod(1 + RvolT),
+        },
+        "returns": {
+            "Actual expectation": (E_r + 0.5 * vol**2), 
+            "Used expectation": E_R
+        }
+    })
+
 
     return results
 
