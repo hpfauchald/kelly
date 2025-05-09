@@ -2,11 +2,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import trange
-from kelly_utils import kelly, save_plot, drawdown, tic, toc
+from kelly_utils import kelly, save_plot, drawdown, bootstrap_ci, bootstrap_distribution, tic, toc
+import seaborn as sns
 
 # USER SETTINGS
 
-periods = 360
+periods = 252
 n_years = 30
 
 burn_in = 1000
@@ -20,17 +21,17 @@ Rebalancing = 12  # Times per year
 
 scale_long = "none"  # options: "none", "same_avg_vol", "vol_targeting"
 
-sharpe = "consant"  # options: "constant", "variable"
+sharpe = "variable"  # options: "constant", "variable"
 
 annual_ret = 0.05
 
 SR = 0.40  # Expected annualized sharpe ratio.
 
-m = 0.00  # degree of momentum
+m = 0.01  # degree of momentum
 
 use_momentum = False
 use_TC = False
-return_paths = True
+return_paths = False
 
 # Parameters for volatility simulations
 
@@ -48,7 +49,7 @@ c = SR / np.sqrt(periods)
 ## End of user settings
 tic()
 
-n_simulations = 10
+n_simulations = 1000
 results_list = []
 vol_paths = []
 wealth_kelly = []
@@ -79,7 +80,7 @@ for _ in trange(n_simulations, desc="Running simulations"):
         scale_long,
         use_momentum,
         use_TC,
-        return_paths=True,
+        return_paths=False,
     )
     # Keep only scalar statistics
     results_list.append(
@@ -87,6 +88,9 @@ for _ in trange(n_simulations, desc="Running simulations"):
             "sharpe_long": result["sharpe_long"],
             "sharpe_kelly": result["sharpe_kelly"],
             "sharpe_volTarget": result["sharpe_volTarget"],
+            "mod_sharpe_long": result["mod_sharpe_long"],
+            "mod_sharpe_kelly": result["mod_sharpe_kelly"],
+            "mod_sharpe_volTarget": result["mod_sharpe_volTarget"],
             "final_wealth_long": result["final_wealth_long"],
             "final_wealth_kelly": result["final_wealth_kelly"],
             "final_wealth_volTarget": result["final_wealth_volTarget"],
@@ -95,115 +99,61 @@ for _ in trange(n_simulations, desc="Running simulations"):
             "max_dd_volTarget": result["max_dd_volTarget"],
         }
     )
-    vol_paths.append(result["volatility_path"])
-    wealth_kelly.append(result["wealth_paths"]["kelly"])
-    wealth_volT.append(result["wealth_paths"]["vol_target"])
-    wealth_long.append(result["wealth_paths"]["buy_and_hold"])
 
-# Volatility
-vol_array = np.vstack(vol_paths)  # shape: (n_simulations, time_steps)
-avg_vol = vol_array.mean(axis=0)
+wealth_long = [result["final_wealth_long"] for result in results_list]
+wealth_kelly = [result["final_wealth_kelly"] for result in results_list]
+wealth_volT = [result["final_wealth_volTarget"] for result in results_list]
 
-# Wealth
-W_kelly = np.vstack(wealth_kelly)
-W_volT = np.vstack(wealth_volT)
-W_long = np.vstack(wealth_long)
-
-# Averages
-avg_kelly = W_kelly.mean(axis=0)
-avg_volT = W_volT.mean(axis=0)
-avg_long = W_long.mean(axis=0)
-
-# Apply drawdown to each row (simulation)
-DD_kelly = np.array([drawdown(w) for w in W_kelly])
-DD_volT = np.array([drawdown(w) for w in W_volT])
-DD_long = np.array([drawdown(w) for w in W_long])
-
-avg_dd_kelly = DD_kelly.mean(axis=0)
-avg_dd_volT = DD_volT.mean(axis=0)
-avg_dd_long = DD_long.mean(axis=0)
-
+dd_long = [result["max_dd_long"] for result in results_list]
+dd_kelly = [result["max_dd_kelly"] for result in results_list]
+dd_volT = [result["max_dd_volTarget"] for result in results_list]
 
 # Convert to DataFrame
 df = pd.DataFrame(results_list)
 
 mean_results = df.mean().round(4)
+median_results = df.median().round(4)
 table = pd.DataFrame(
     {
         "Buy-and-Hold": {
             "Sharpe": mean_results["sharpe_long"],
-            "Final Wealth": mean_results["final_wealth_long"],
+            "Modified Sharpe": mean_results["mod_sharpe_long"], 
+            "Final Wealth": median_results["final_wealth_long"],
             "Max Drawdown": mean_results["max_dd_long"],
         },
         "Kelly": {
             "Sharpe": mean_results["sharpe_kelly"],
-            "Final Wealth": mean_results["final_wealth_kelly"],
+            "Modified Sharpe": mean_results["mod_sharpe_kelly"], 
+            "Final Wealth": median_results["final_wealth_kelly"],
             "Max Drawdown": mean_results["max_dd_kelly"],
         },
         "Vol Targeting": {
             "Sharpe": mean_results["sharpe_volTarget"],
-            "Final Wealth": mean_results["final_wealth_volTarget"],
+            "Modified Sharpe": mean_results["mod_sharpe_volTarget"], 
+            "Final Wealth": median_results["final_wealth_volTarget"],
             "Max Drawdown": mean_results["max_dd_volTarget"],
         },
     }
 )
 print(table)
 
-## Figure 1
-fig = plt.figure(figsize=(10, 5))
-plt.plot(avg_vol, label="Average Volatility", color="blue")
-plt.title("Volatility Over Time (Monte Carlo Average)")
-plt.xlabel("Time")
-plt.ylabel("Annualized Volatility")
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-save_plot(fig, fig_number=1)  # Save as figs/fig1.png
-plt.close()
+# Generate bootstrap distributions
+bootstrap_long = bootstrap_distribution(dd_long, stat_func=np.mean)
+bootstrap_kelly = bootstrap_distribution(dd_kelly, stat_func=np.mean)
+bootstrap_volT = bootstrap_distribution(dd_volT, stat_func=np.mean)
 
-## Figure 2
-fig = plt.figure(figsize=(10, 5))
+# Combine for seaborn
+boot_data = [bootstrap_long, bootstrap_kelly, bootstrap_volT]
+labels = ["Buy-and-Hold", "Kelly", "Vol Targeting"]
 
-# Kelly
-plt.plot(avg_kelly, label="Kelly", color="blue")
+plt.figure(figsize=(12, 6))
 
-# Volatility Targeting
-plt.plot(avg_volT, label="Vol Targeting", color="orange")
-
-# Buy and Hold
-plt.plot(avg_long, label="Buy and Hold", color="green", linestyle="--")
-
-plt.title("Average Wealth Path Over Time (Monte Carlo)")
-plt.xlabel("Rebalancing Periods")
-plt.ylabel("Wealth")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.yscale("log")
-
-save_plot(fig, fig_number=2)
-plt.close()
-
-## Figure 3
-fig = plt.figure(figsize=(10, 5))
-
-# Kelly
-plt.plot(avg_dd_kelly, label="Kelly", color="blue")
-
-# Vol Targeting
-plt.plot(avg_dd_volT, label="Vol Targeting", color="orange")
-
-# Buy and Hold
-plt.plot(avg_dd_long, label="Buy and Hold", color="green", linestyle="--")
-
-plt.title("Average Drawdown Path Over Time (Monte Carlo)")
-plt.xlabel("Rebalancing Periods")
-plt.ylabel("Drawdown")
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-
-save_plot(fig, fig_number=3)
-plt.close()
+# Standard boxplot without adjusting whiskers
+sns.boxplot(data=boot_data, showfliers=True)
+plt.xticks([0, 1, 2], labels)
+plt.title("Bootstrapped Wealth Distributions")
+plt.ylabel("Final Wealth")
+#plt.yscale("log")
+plt.show()
 
 toc()

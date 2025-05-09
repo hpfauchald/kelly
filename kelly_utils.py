@@ -114,6 +114,57 @@ def stats(R_ts, Rebalancing):
     wealth_path = np.cumprod(1 + R_ts)
     return sr, wealth_path[-1], drawdown(wealth_path).min()
 
+def modified_sharpe_ratio(R_ts, Rebalancing, target=0.0):
+    """
+    Computes annualized modified Sharpe ratio using downside deviation from 0,
+    assuming returns are already excess and periodic (e.g., monthly).
+
+    Args:
+        returns (np.array): Array of periodic excess returns.
+        rebalancing (int): Number of periods per year (e.g., 12 for monthly data).
+
+    Returns:
+        float: Annualized modified Sharpe ratio.
+    """
+    mean= np.mean(R_ts) * Rebalancing
+
+    downside = np.minimum(R_ts - target, 0.0)
+    dd = np.sqrt(np.sum(downside**2) / (len(R_ts) - 1)) 
+    
+    if dd == 0:
+        return np.nan
+    
+    return (mean / (np.sqrt(2) * dd * np.sqrt(Rebalancing)))
+
+import numpy as np
+
+def bootstrap_ci(data, num_samples=1000, ci=0.95, stat_func=np.mean):
+    """
+    Computes a bootstrap confidence interval for a given statistic.
+
+    Args:
+        data (array-like): Input data.
+        num_samples (int): Number of bootstrap samples.
+        ci (float): Confidence level (e.g., 0.95).
+        stat_func (callable): Statistic function (default is np.mean).
+
+    Returns:
+        (float, float): Lower and upper confidence interval.
+    """
+    n = len(data)
+    stats = [stat_func(np.random.choice(data, size=n, replace=True)) for _ in range(num_samples)]
+    lower_bound = np.percentile(stats, (1 - ci) / 2 * 100)
+    upper_bound = np.percentile(stats, (1 + ci) / 2 * 100)
+    return lower_bound, upper_bound
+
+
+def bootstrap_distribution(data, num_samples=1000, stat_func=np.median):
+    """
+    Generates a bootstrap distribution for a given statistic.
+    """
+    n = len(data)
+    stats = [stat_func(np.random.choice(data, size=n, replace=True)) for _ in range(num_samples)]
+    return np.array(stats)
 
 def kelly(
     n_years,
@@ -237,8 +288,14 @@ def kelly(
     sl, wl, dl = stats(monthly_long, Rebalancing)
     sk, wk, dk = stats(Rp, Rebalancing)
     sv, wv, dv = stats(RvolT, Rebalancing)
+    mod_SR_l = modified_sharpe_ratio(monthly_long, Rebalancing)
+    mod_SR_k = modified_sharpe_ratio(Rp, Rebalancing)
+    mod_SR_v = modified_sharpe_ratio(RvolT, Rebalancing)
 
     results = {
+    "mod_sharpe_long": mod_SR_l,
+    "mod_sharpe_kelly": mod_SR_k,
+    "mod_sharpe_volTarget": mod_SR_v,
     "sharpe_long": sl,
     "sharpe_kelly": sk,
     "sharpe_volTarget": sv,
@@ -260,7 +317,7 @@ def kelly(
                 "buy_and_hold": np.cumprod(1 + monthly_long),
                 "kelly": np.cumprod(1 + Rp),
                 "vol_target": np.cumprod(1 + RvolT),
-            }
+            } 
         })
 
     return results
