@@ -39,8 +39,9 @@ jump_prob = 1 - np.exp(-jumps_per_year * (1 / periods))
 jump_size = 0.30
 c = SR / np.sqrt(periods)
 
-n_sims = 1000
+n_sims = 10
 output_file = "simulation_summary.xlsx"
+wealth_file = "simulation_wealth.xlsx"
 
 def run_simulation(sim):
     res = kelly(
@@ -71,20 +72,41 @@ def run_simulation(sim):
         'kelly weights':        np.mean(res['kelly_weights']),
         'vol_target_weights':   np.mean(res['vol_target_weights']),
         'Mean volatility': res['volatility_path'].mean()
-    }
+    }, np.log(res['final_wealth_kelly']), np.log(res['final_wealth_long']), np.log(res['final_wealth_volTarget'])
 
 if __name__ == "__main__":
     tic()
 
     # Use tqdm with joblib
-    with tqdm_joblib(tqdm(total=n_sims, desc="Running simulations", ncols=200)) as progress_bar:
+    all_metrics = []
+    kelly_wealth = []
+    bh_wealth = []
+    vol_wealth = []
+
+    with tqdm_joblib(tqdm(total=n_sims, desc="Running simulations", ncols=100)) as progress_bar:
         results = Parallel(n_jobs=6)(
             delayed(run_simulation)(sim) for sim in range(n_sims)
         )
+    
+    # Separate the results into summary and wealth
+    for metrics, kelly, bh, vol in results:
+        all_metrics.append(metrics)
+        kelly_wealth.append(kelly)
+        bh_wealth.append(bh)
+        vol_wealth.append(vol)
+
+    # Save the summary
+    summary_df = pd.DataFrame(all_metrics).set_index("sim")
+    summary_df.describe().round(4).to_excel(output_file)
+    print(f"Summary saved to {output_file}")
+
+    # Save the wealth distributions
+    wealth_df = pd.DataFrame({
+        "Kelly": kelly_wealth,
+        "Buy-and-Hold": bh_wealth,
+        "Vol Targeting": vol_wealth
+    })
+    wealth_df.to_excel(wealth_file, index=False)
+    print(f"Wealth distributions saved to {wealth_file}")
 
     toc()
-
-    # Save to Excel
-    data = pd.DataFrame(results).set_index("sim")
-    data.describe().round(4).to_excel(output_file)
-    print(f"Table saved to {output_file}")
