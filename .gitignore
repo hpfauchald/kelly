@@ -17,6 +17,8 @@ venv.bak/
 
 # Files
 *.ipynb
+*.csv
+*.xlsx
 
 # Folders
 /figs 
