@@ -65,6 +65,53 @@ def simulate_regime_vol_with_jumps(
 
     return lns, regime, jumps
 
+import numpy as np
+import pandas as pd
+
+def har(returns, N=252):
+    """
+    Forecast variance using the HAR (Heterogeneous Autoregressive) model.
+
+    Args:
+        returns (array-like): Sequence of log returns.
+        N (int): Number of return observations per year (e.g., 252 for daily).
+
+    Returns:
+        np.ndarray: HAR-forecasted variance for each period (NaNs for initial lags).
+    """
+    returns = np.asarray(returns)
+    RV = returns**2  # Realized variance
+
+    # Rolling averages: 1-day (lagged), 5-day (weekly), 22-day (monthly)
+    RV_series = pd.Series(RV)
+    daily_lag = RV_series.shift(1)
+    weekly_avg = RV_series.rolling(window=5).mean().shift(1)
+    monthly_avg = RV_series.rolling(window=22).mean().shift(1)
+
+    # Drop initial NaNs
+    X = pd.concat([daily_lag, weekly_avg, monthly_avg], axis=1).dropna()
+    X.columns = ["daily", "weekly", "monthly"]
+    y = RV_series.loc[X.index]  # Align targets with predictors
+
+    # Add intercept
+    X.insert(0, "intercept", 1.0)
+
+    # Estimate HAR coefficients via OLS
+    beta = np.linalg.lstsq(X.values, y.values, rcond=None)[0]
+
+    # Forecast next-period variance
+    X_full = pd.DataFrame({
+        "intercept": 1.0,
+        "daily": daily_lag,
+        "weekly": weekly_avg,
+        "monthly": monthly_avg
+    })
+    forecasts = X_full.dot(beta)
+
+    # Ensure non-negative variances
+    return np.maximum(forecasts.to_numpy(), 1e-10)
+
+
 
 def drawdown(P):
     """
@@ -136,11 +183,13 @@ def kelly(
     Rebalancing,
     scale_long,
     use_momentum,
-    use_TC,
     return_paths, 
     tc, 
-    expected_return = "knwown", 
-    return_vol_relation = "yes", 
+    estimation_period, 
+    deviation, 
+    rebalance_fraction,
+    expected_return = "known", 
+    return_vol_relation: bool = True,  
     expected_vol = "known"
 ):
     """
@@ -192,10 +241,33 @@ def kelly(
         if use_momentum and regime[i] == 0:
             E_r[i] += m * momentum[i]
 
-        r[i] = E_r[i] + sigma * np.random.randn()
+        r[i] = E_r[i] +  sigma * np.random.randn()
         p[i] = p[i - 1] + r[i]
     
-    hist_r   = pd.Series(r).rolling(window=2520).mean().to_numpy()
+
+    pred_E_R2 = har(r, periods)
+    vol = np.exp(lns)
+
+    if expected_vol == "known":
+        E_R2 = vol**2
+    elif expected_vol == "unknown":
+        E_R2 = pred_E_R2
+    
+
+    if expected_return == "known":
+        E_R = E_r + 0.5 * E_R2
+    elif expected_return == "unknown":
+        if return_vol_relation:
+            historic_sharpe = pd.Series(r).shift(1).rolling(window=estimation_period * periods).apply(
+                lambda x: x.mean() / x.std(ddof=1) if x.std(ddof=1) > 0 else np.nan,
+                raw=False
+            )
+            pred_E_R = historic_sharpe * np.sqrt(E_R2)
+        else:
+            pred_E_R = pd.Series(r).shift(1).rolling(window=estimation_period * periods).mean().to_numpy()
+        
+        E_R = pred_E_R + 0.5 * E_R2
+
 
     # 3) Discard burn-in
     p = p[burn_in:] - p[burn_in]
@@ -203,42 +275,29 @@ def kelly(
     E_r = E_r[burn_in:]
     momentum = momentum[burn_in:]
     lns = lns[burn_in:]
-    hist_r = hist_r[burn_in:]
+    E_R = E_R[burn_in:]
+    E_R2 = E_R2[burn_in:]
+    vol = vol[burn_in:]
 
     # 4) Levels & returns
     P = np.exp(p)
     R = np.exp(r) - 1
-    vol = np.exp(lns)
-
-    if expected_return == "known":
-        E_R = E_r + 0.5 * vol**2
-    elif expected_return == "unknown": 
-        E_R = hist_r + 0.5*vol**2
-
-    if expected_vol == "known":
-        E_R2 = vol**2
-    elif expected_vol == "unknown":
-        E_R2 = "SETT INN FUNKSJON FOR VOL ESTIMERING"
+    
 
     # Weights
     w = np.clip(f * (E_R / E_R2), min_leverage, max_leverage)
     w_volTarget = np.clip(np.mean(vol) / vol, min_leverage, max_leverage)
+
+    w = np.asarray(w)
+    w_volTarget = np.asarray(w_volTarget)
 
     # 5) Rebalancing
     step = periods // Rebalancing
     rebalance_points = list(range(step, len(R) - step, step))
     steps = len(rebalance_points)
 
-    if use_TC:
-        Rp, Rp_tc = rebalanced_returns(R, w, Rebalancing, periods, tc)
-        RvolT, RvolT_tc_ = rebalanced_returns(R, w_volTarget, Rebalancing, periods, tc)
-    else:
-        Rp = np.zeros(steps)
-        RvolT = np.zeros(steps)
-        for idx, i in enumerate(rebalance_points):
-            this_ret = max((np.prod(1 + R[i : i+step]) - 1),-1)
-            Rp[idx] = max(w[i] * this_ret,-1)
-            RvolT[idx] = max(w_volTarget[i] * this_ret,-1)
+    Rp, Rp_tc = rebalanced_returns(R, w, Rebalancing,  deviation, rebalance_fraction,periods, tc,)
+    RvolT, RvolT_tc_ = rebalanced_returns(R, w_volTarget, Rebalancing, deviation, rebalance_fraction, periods, tc)
 
     # 6) Buy-and-hold monthly
     monthly_long = P[step::step] / P[:-step:step] - 1
@@ -284,7 +343,8 @@ def kelly(
         },
         "returns": {
             "Actual expectation": (E_r + 0.5 * vol**2), 
-            "Used expectation": E_R
+            "Used expectation": E_R, 
+            "Realized return": R
         }
     })
 
@@ -363,9 +423,11 @@ def simulate_two_asset_returns(
 
 
 def rebalanced_returns(
-     R: np.ndarray,
+    R: np.ndarray,
     w: np.ndarray,
     rebalancing: int,
+    deviation, 
+    rebalance_fraction, 
     periods: int = 12,
     tc: float = 0.001
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -400,12 +462,21 @@ def rebalanced_returns(
 
     for idx, i in enumerate(rebalance_points):
         # cumulative return over the last interval
-        prev_ret = max((np.prod(1 + R[i - step : i])-1).sum(), -1)
+        prev_ret = max((np.prod(1 + R[i - step : i])-1), -1)
         # return over the upcoming interval
-        this_ret = max((np.prod(1 + R[i : min(i + step, T)])-1).sum(), -1)
+        this_ret = max((np.prod(1 + R[i : min(i + step, T)])-1), -1)
 
         # “effective” weight just before rebalancing
         w_eff = w[i - 1] * (1 + prev_ret) / (1 + w[i - 1] * prev_ret)
+
+        # Only rebalance if deviation threshold exceeded
+        deviation_fraction = abs(w[i] / w_eff - 1) if w_eff != 0 else 1
+        if deviation_fraction > deviation:
+            w_adj = w_eff + (w[i] - w_eff) * rebalance_fraction
+        else:
+            w_adj = w_eff  # No rebalancing
+
+        w[i] = w_adj
 
         # compute trade amount and cost
         trade = abs(w[i] - w_eff)
@@ -676,3 +747,11 @@ def simulate_kelly(
         'tc_eq_EW':     tc_eq_EW_total,
         'tc_b_EW':      tc_b_EW_total
     }
+
+
+# compute average drawdown from the wealth path
+def avg_dd(wealth):
+    hwm = np.maximum.accumulate(wealth)
+    dd  = 1 - wealth / hwm
+    return dd.mean()
+
