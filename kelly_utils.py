@@ -65,8 +65,6 @@ def simulate_regime_vol_with_jumps(
 
     return lns, regime, jumps
 
-import numpy as np
-import pandas as pd
 
 def har(returns, N=252):
     """
