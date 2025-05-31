@@ -4,7 +4,8 @@ from scipy.stats import skew, kurtosis
 import statsmodels.api as sm
 import os
 
-def get_first_and_last_day_in_period(date_list, period='M'):
+
+def get_first_and_last_day_in_period(date_list, period="M"):
     """
     Given a Series of datetime64, return the index positions of the first and last
     observation in each period.
@@ -18,8 +19,8 @@ def get_first_and_last_day_in_period(date_list, period='M'):
     - last_idx: integer positions of last date in each period
     """
     # Create a dummy DataFrame for grouping
-    df = pd.DataFrame({'date': date_list})
-    periods = df['date'].dt.to_period(period)
+    df = pd.DataFrame({"date": date_list})
+    periods = df["date"].dt.to_period(period)
 
     # Use integer positions for return values
     first_idx = df.groupby(periods).head(1).index.to_numpy()
@@ -27,7 +28,8 @@ def get_first_and_last_day_in_period(date_list, period='M'):
 
     return first_idx, last_idx
 
-def aggregate_returns(original_returns, date_list, period='M'):
+
+def aggregate_returns(original_returns, date_list, period="M"):
     """
     Aggregate returns over time by compounding: ∏(1 + r) - 1
 
@@ -55,12 +57,13 @@ def aggregate_returns(original_returns, date_list, period='M'):
         first = first_idx[i]
         last = last_idx[i]
 
-        window = original_returns.iloc[first:last + 1]  # include last row
+        window = original_returns.iloc[first : last + 1]  # include last row
         aggregated_returns[i, :] = (1 + window).prod(axis=0).values - 1
 
     return aggregated_returns
 
-def aggregate_variance(original_var, date_list, period='M'):
+
+def aggregate_variance(original_var, date_list, period="M"):
     """
     Aggregate variance or volatility proxy over time by summing.
 
@@ -85,10 +88,47 @@ def aggregate_variance(original_var, date_list, period='M'):
         first = first_idx[i]
         last = last_idx[i]
 
-        window = original_var.iloc[first:last + 1]
+        window = original_var.iloc[first : last + 1]
         aggregated_var[i, :] = window.sum(axis=0).values
 
     return aggregated_var
+
+
+def scale_last_variance(original_var, date_list, period="M"):
+    """
+    Create time-scaled variance by using the last daily value in each period
+    and multiplying by the number of trading days in that period.
+
+    Parameters:
+    - original_var: pd.DataFrame or pd.Series of daily variances
+    - date_list: pd.Series of datetime64[ns], same length as original_var
+    - period: 'M' for monthly, 'Y' for yearly, etc.
+
+    Returns:
+    - scaled_var: np.ndarray of shape (nPeriods, nAssets)
+    """
+    if isinstance(original_var, pd.Series):
+        original_var = original_var.to_frame()
+
+    n_assets = original_var.shape[1]
+    first_idx, last_idx = get_first_and_last_day_in_period(date_list, period)
+    n_periods = len(first_idx)
+
+    scaled_var = np.zeros((n_periods, n_assets))
+
+    for i in range(n_periods):
+        first = first_idx[i]
+        last = last_idx[i]
+        window = original_var.iloc[first : last + 1]
+
+        # Get the last value in the window
+        last_value = window.iloc[-1].values
+
+        # Scale by number of trading days in the window
+        num_days = last - first + 1
+        scaled_var[i, :] = num_days * last_value
+
+    return scaled_var
 
 
 def drawdown(P):
@@ -100,42 +140,251 @@ def drawdown(P):
     dd = P / peak - 1.0
     return dd
 
-def stats(R_ts, Rebalancing):
-    mean = R_ts.mean() * Rebalancing                # Annualized return
-    sd = R_ts.std() * np.sqrt(Rebalancing)          # Annualized standard deviation
-    sr = mean / sd                                  # Sharpe ratio
-    wealth_path = np.cumprod(1 + R_ts)              # NAV path
-    return sr, wealth_path.iloc[-1], drawdown(wealth_path).min()
 
-def fit_har_model(df, rv_col='RV'):
+def stats(R_ts, Rf, Rebalancing):
+    total_returns_simple = R_ts + Rf
+    n_periods = len(R_ts)
+
+    final_pt_val_rf = np.prod(1 + Rf)
+    final_pt_val_total = np.prod(1 + total_returns_simple)
+
+    geom_avg_rf = 100 * final_pt_val_rf ** (Rebalancing / n_periods) - 1
+    geom_avg_total_return = 100 * final_pt_val_total ** (Rebalancing / n_periods) - 1
+    geom_avg_xs_return = geom_avg_total_return - geom_avg_rf
+
+    xs_returns = R_ts * 100
+    total_returns = total_returns_simple * 100
+
+    arithm_avg_total_return = np.mean(total_returns) * Rebalancing
+    arithm_avg_xs_return = np.mean(xs_returns) * Rebalancing
+
+    std_xs_returns = xs_returns.std() * np.sqrt(Rebalancing)
+    sharpe_arithmetic = arithm_avg_xs_return / std_xs_returns
+
+    sharpe_geometric = geom_avg_xs_return / std_xs_returns
+
+    sharpe_sdr = modified_sharpe_ratio(R_ts, Rebalancing)
+
+    min_xs_return = xs_returns.min()
+    max_xs_return = xs_returns.max()
+    skew_xs_returns = skew(xs_returns)
+    kurt_xs_returns = kurtosis(xs_returns, fisher=False)
+
+    wealth_path = np.cumprod(1 + total_returns_simple)
+
+    return (
+        arithm_avg_total_return,
+        arithm_avg_xs_return,
+        sharpe_arithmetic,
+        geom_avg_total_return,
+        geom_avg_xs_return,
+        sharpe_geometric,
+        sharpe_sdr,
+        wealth_path.iloc[-1],
+        drawdown(wealth_path).min(),
+        min_xs_return,
+        max_xs_return,
+        skew_xs_returns,
+        kurt_xs_returns,
+    )
+
+
+def modified_sharpe_ratio(R_ts, Rebalancing, target=0.0):
+    """
+    Computes annualized modified Sharpe ratio using downside deviation from 0,
+    assuming returns are already excess and periodic (e.g., monthly).
+
+    Args:
+        returns (np.array): Array of periodic excess returns.
+        rebalancing (int): Number of periods per year (e.g., 12 for monthly data).
+
+    Returns:
+        float: Annualized modified Sharpe ratio.
+    """
+    mean = np.mean(R_ts) * Rebalancing
+
+    downside = np.minimum(R_ts - target, 0.0)
+    dd = np.sqrt(np.sum(downside**2) / (len(R_ts) - 1))
+
+    if dd == 0:
+        return np.nan
+
+    return mean / (np.sqrt(2) * dd * np.sqrt(Rebalancing))
+
+
+def summarize_strategies(returns_dict, rf_dict, rebalancing_freq=12):
+    """
+    Summarize performance metrics for multiple strategies.
+
+    Parameters:
+    - returns_dict: dict[strategy_name -> pd.Series] of excess returns
+    - rf_dict: dict[strategy_name -> pd.Series] of risk-free rates
+    - rebalancing_freq: number of periods per year (e.g., 12 for monthly)
+
+    Returns:
+    - pd.DataFrame of summary statistics
+    """
+    summary = []
+
+    for name, R_ts in returns_dict.items():
+        Rf = rf_dict[name]
+        results = stats(R_ts, Rf, rebalancing_freq)
+
+        summary.append(
+            {
+                "Strategy": name,
+                "Arith. Total Return (%)": results[0],
+                "Arith. Excess Return (%)": results[1],
+                "Sharpe (Arithmetic)": results[2],
+                "Geom. Total Return (%)": results[3],
+                "Geom. Excess Return (%)": results[4],
+                "Sharpe (Geometric)": results[5],
+                "SDR Sharpe": results[6],
+                "Terminal Wealth": results[7],
+                "Max Drawdown": results[8],
+                "Min Return (%)": results[9],
+                "Max Return (%)": results[10],
+                "Skewness": results[11],
+                "Kurtosis": results[12],
+            }
+        )
+
+    return pd.DataFrame(summary)
+
+
+def fit_har_model(df, rv_col="RV"):
     df = df.copy()
 
     # Step 1: Compute log RV and lags (local variables only)
     log_RV = np.log(df[rv_col])
+    # log_RV = df[rv_col]
     log_RV_d = log_RV.shift(1)
     log_RV_w = log_RV.rolling(window=5, min_periods=5).mean().shift(1)
     log_RV_m = log_RV.rolling(window=22, min_periods=22).mean().shift(1)
 
     # Step 2: Prepare regression dataset
-    har_df = pd.DataFrame({
-        'log_RV': log_RV,
-        'log_RV_d': log_RV_d,
-        'log_RV_w': log_RV_w,
-        'log_RV_m': log_RV_m
-    }).dropna()
+    har_df = pd.DataFrame(
+        {
+            "log_RV": log_RV,
+            "log_RV_d": log_RV_d,
+            "log_RV_w": log_RV_w,
+            "log_RV_m": log_RV_m,
+        }
+    ).dropna()
 
-    X = sm.add_constant(har_df[['log_RV_d', 'log_RV_w', 'log_RV_m']])
-    y = har_df['log_RV']
-    model = sm.OLS(y, X).fit()
+    X = sm.add_constant(har_df[["log_RV_d", "log_RV_w", "log_RV_m"]])
+    y = har_df["log_RV"]
+    model = sm.OLS(y, X).fit()  # cov_type='HC0'
 
     # Step 3: Predict log RV and convert back to variance scale
-    full_X = sm.add_constant(pd.DataFrame({
-        'log_RV_d': log_RV_d,
-        'log_RV_w': log_RV_w,
-        'log_RV_m': log_RV_m
-    }))
+    full_X = sm.add_constant(
+        pd.DataFrame({"log_RV_d": log_RV_d, "log_RV_w": log_RV_w, "log_RV_m": log_RV_m})
+    )
     log_RV_pred = model.predict(full_X).shift(1)
-    df['RV_pred'] = np.exp(log_RV_pred)
+    df["RV_pred"] = np.exp(log_RV_pred)
+    # df['RV_pred'] = log_RV_pred
 
     return df, model
 
+
+def har(returns, N=252):
+    """
+    Forecast variance using the HAR (Heterogeneous Autoregressive) model.
+
+    Args:
+        returns (array-like): Sequence of log returns.
+        N (int): Number of return observations per year (e.g., 252 for daily).
+
+    Returns:
+        np.ndarray: HAR-forecasted variance for each period (NaNs for initial lags).
+    """
+    returns = np.asarray(returns)
+    RV = returns**2  # Realized variance
+
+    # Rolling averages: 1-day (lagged), 5-day (weekly), 22-day (monthly)
+    RV_series = pd.Series(RV)
+    daily_lag = RV_series.shift(1)
+    weekly_avg = RV_series.rolling(window=5).mean().shift(1)
+    monthly_avg = RV_series.rolling(window=22).mean().shift(1)
+
+    # Drop initial NaNs
+    X = pd.concat([daily_lag, weekly_avg, monthly_avg], axis=1).dropna()
+    X.columns = ["daily", "weekly", "monthly"]
+    y = RV_series.loc[X.index]  # Align targets with predictors
+
+    # Add intercept
+    X.insert(0, "intercept", 1.0)
+
+    # Estimate HAR coefficients via OLS
+    beta = np.linalg.lstsq(X.values, y.values, rcond=None)[0]
+
+    # Forecast next-period variance
+    X_full = pd.DataFrame(
+        {
+            "intercept": 1.0,
+            "daily": daily_lag,
+            "weekly": weekly_avg,
+            "monthly": monthly_avg,
+        }
+    )
+    forecasts = X_full.dot(beta)
+
+    # Ensure non-negative variances
+    return np.maximum(forecasts.to_numpy(), 1e-10)
+
+
+def aggregate_fixed_window_returns(original_returns, window_size=21):
+    """
+    Aggregate returns over fixed non-overlapping windows (e.g., 21 trading days).
+
+    Parameters:
+    - original_returns: pd.DataFrame or pd.Series of returns (daily)
+    - window_size: int, number of periods per aggregation (default=21 for ~monthly)
+
+    Returns:
+    - aggregated_returns: np.ndarray of shape (n_blocks, n_assets)
+    """
+
+    # Ensure 2D structure
+    if isinstance(original_returns, pd.Series):
+        original_returns = original_returns.to_frame()
+
+    original_returns = original_returns.dropna()
+    n_obs = len(original_returns)
+    n_assets = original_returns.shape[1]
+
+    # Number of full non-overlapping blocks
+    n_blocks = n_obs // window_size
+    aggregated_returns = np.zeros((n_blocks, n_assets))
+
+    for i in range(n_blocks):
+        start = i * window_size
+        end = start + window_size
+        window = original_returns.iloc[start:end]
+        aggregated_returns[i, :] = (1 + window).prod(axis=0).values - 1
+
+    return aggregated_returns
+
+
+def get_fixed_month_end_dates(df, window_size=21):
+    """
+    Extracts the end dates of fixed-length trading months (e.g., 21-day blocks).
+
+    Parameters:
+    - df: pd.DataFrame with a DatetimeIndex
+    - window_size: int, length of each trading month (default = 21)
+
+    Returns:
+    - List of pd.Timestamp corresponding to the end of each block
+    """
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Input DataFrame must have a DatetimeIndex")
+
+    n_obs = len(df)
+    n_blocks = n_obs // window_size
+    block_end_indices = [(i + 1) * window_size - 1 for i in range(n_blocks)]
+
+    # Make sure we don’t go out of bounds
+    block_end_indices = [i for i in block_end_indices if i < n_obs]
+
+    return df.index[block_end_indices]
