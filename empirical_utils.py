@@ -171,6 +171,8 @@ def stats(R_ts, Rf, Rebalancing):
     kurt_xs_returns = kurtosis(xs_returns, fisher=False)
 
     wealth_path = np.cumprod(1 + total_returns_simple)
+    terminal_wealth = wealth_path.iloc[-1]
+    log_terminal_wealth = np.log(terminal_wealth)
 
     return (
         arithm_avg_total_return,
@@ -180,12 +182,13 @@ def stats(R_ts, Rf, Rebalancing):
         geom_avg_xs_return,
         sharpe_geometric,
         sharpe_sdr,
-        wealth_path.iloc[-1],
+        terminal_wealth,
         drawdown(wealth_path).min(),
         min_xs_return,
         max_xs_return,
         skew_xs_returns,
         kurt_xs_returns,
+        log_terminal_wealth,
     )
 
 
@@ -246,6 +249,7 @@ def summarize_strategies(returns_dict, rf_dict, rebalancing_freq=12):
                 "Max Return (%)": results[10],
                 "Skewness": results[11],
                 "Kurtosis": results[12],
+                "Final Log Wealth": results[13],
             }
         )
 
